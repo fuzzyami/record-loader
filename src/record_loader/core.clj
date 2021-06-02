@@ -68,21 +68,24 @@
                            (logline record-type instance-num (str "caught exception writing asset from line: " line ". " (.getMessage e)))
                            (logline record-type instance-num (with-out-str (clojure.stacktrace/print-stack-trace e)))))))
 
+(defn delete-files [filename gz-filename]
+  (try (io/delete-file filename) (catch Exception e))
+  (try (io/delete-file gz-filename) (catch Exception e)))
+
 (defn download-file [filename record-type instance-num]
   (let [gz-filenae (str filename ".gz")]
-    (try (io/delete-file filename) (catch Exception e))
-    (try (io/delete-file gz-filenae) (catch Exception e))
+    ;delete previous instances of the file
+    (delete-files filename gz-filenae)
     (logline record-type instance-num (str "downloading file " gz-filenae " from gcp..."))
     (st/download-file-from-storage (st/init {}) (str "gs://cyco-jesse-tmp/record-loader/" gz-filenae) gz-filenae)
     (logline record-type instance-num (str " ..unzipping.. " filename))
     (gunzip (io/file gz-filenae) (io/file filename))
     (logline record-type instance-num " ..done!")))
 
-(def DD_AGENT_HOST "172.16.16.32")
 
 (defn -main [record-type instance-num & args]
   (configure-logger! {:log-level :fatal})
-  (let [filename (str record-type "-" instance-num)         ;edges-00 (or edges.00.gz)
+  (let [filename (str record-type "-" instance-num)         ;edges-000 (or edges-000.gz)
         res (download-file filename record-type instance-num)
         config {:tinkles {:key "key" :url "http://engine-api.cycognito.com/tinkles/"}
                 :hamurai {:project "cyco-main" :instance "qa-instance"}}]
@@ -92,4 +95,6 @@
     (with-open [rdr (clojure.java.io/reader filename)]
       (doseq [line (line-seq rdr)] ;only read a line at a time as these are large files
         (insert-record config line record-type instance-num)))
-    (logline record-type instance-num (str "done processing file:" filename ". total writes:" @atom-counter))))
+    (logline record-type instance-num (str "done processing file:" filename ". total writes:" @atom-counter))
+    ;cleanup:
+    (delete-files filename (str filename ".gz"))))
