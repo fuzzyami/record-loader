@@ -10,7 +10,7 @@
             [cbass :refer [new-connection store find-by scan delete]]
             [clj-time.format :as f]
             [clj-gcloud.storage :as st]
-            [clj-time.core :as time :refer [days ago now]])
+            [clj-time.core :as time :refer [days ago now before?]])
   (:import java.util.zip.GZIPInputStream))
 
 (defn gunzip
@@ -24,9 +24,11 @@
 
 
 (defn from-ejson-to-clj-time [item]
-    (coerce/from-string (:$date item)))
+  (coerce/from-string (:$date item)))
 
 (def atom-counter (atom 0))
+(def prev-record (atom nil))
+
 (def log-filename "./migration.log")
 (def built-in-formatter (:mysql f/formatters))
 
@@ -44,6 +46,12 @@
     (= record-type :cyco.edge-state) "edge"
     (= record-type :cyco.node-state) "node"))
 
+(defn should-write-node-record? [curr-record prev-record]
+  (if (and (= (:node-id prev-record) (:node-id curr-record))
+           (time/before? (:updated-at curr-record) (:updated-at prev-record)))
+      false
+      true))
+
 (defn insert-record [config line record-type instance-num]
   (try
     (let [record (parse-string line)
@@ -58,12 +66,30 @@
           record (assoc record :updated-at (from-ejson-to-clj-time (:updated-at record)))
           ;frdy serialized fields need explicit conversion:
           record (assoc record :samples (parse-string (:samples record)))
-          record (assoc record :status (parse-string (:status record)))]
-      (do
-        (floob/add-record config record)
-        (swap! atom-counter inc)
-        (when (= 0 (mod @atom-counter 50000))
-          (logline record-type instance-num (str "wrote asset: " assetname)))))
+          record (assoc record :status (parse-string (:status record)))
+          record-digest-fn (fn [curr-record _] (select-keys curr-record [:node-id :updated-at]))]
+
+      (if (nil? @prev-record)
+        ;on the first run, the atom is nil, so just write into it:
+        (swap! prev-record (partial record-digest-fn record))
+        ;else:
+        ;on subsequent runs, the atom contains the previous record's details
+          (if (should-write-node-record? (record-digest-fn record nil) @prev-record)
+            (do
+              (floob/add-record config record)
+              ;update the atom to prevent older records from getting written into the db:
+              (swap! prev-record (partial record-digest-fn record))
+              ;bookeeping:
+              (swap! atom-counter inc)
+              (when (= 0 (mod @atom-counter 50000))
+                (logline record-type instance-num (str "wrote asset: " assetname))))
+
+            ;else - found a stale dup, ignore it
+            (logline record-type instance-num
+                     (str "found a stale dup: " assetname " . this date: " (:updated-at record) ". prev-record date: " (:updated-at @prev-record))))))
+
+
+
       (catch Exception e (do
                            (logline record-type instance-num (str "caught exception writing asset from line: " line ". " (.getMessage e)))
                            (logline record-type instance-num (with-out-str (clojure.stacktrace/print-stack-trace e)))))))
@@ -85,15 +111,17 @@
 
 (defn -main [record-type instance-num & args]
   (configure-logger! {:log-level :fatal})
-  (let [filename (str record-type "-" instance-num)         ;edges-000 (or edges-000.gz)
-        res (download-file filename record-type instance-num)
+  (let [;filename (str record-type "-" instance-num)         ;edges-000 (or edges-000.gz)
+        ;res (download-file filename record-type instance-num)
+        filename "./nodes.json"
         config {:tinkles {:key "key" :url "http://engine-api.cycognito.com/tinkles/"}
+                ;:hamurai {:project "cyco-jesse" :instance "instance2"}}]
                 :hamurai {:project "cyco-main" :instance "qa-instance"}}]
     (floob/init-schemas config)
     (floob/init-hamurai (:hamurai config))
     (logline record-type instance-num "processing file...")
     (with-open [rdr (clojure.java.io/reader filename)]
-      (doseq [line (line-seq rdr)] ;only read a line at a time as these are large files
+      (doseq [line (line-seq rdr)]                          ;only read a line at a time as these are large files
         (insert-record config line record-type instance-num)))
     (logline record-type instance-num (str "done processing file:" filename ". total writes:" @atom-counter))
     ;cleanup:

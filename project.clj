@@ -1,7 +1,7 @@
 (defproject record-loader "0.1.0"
   :dependencies [[org.clojure/clojure "1.10.0"]
                  [com.cycognito/hamurai "0.0.32"]
-                 [com.cycognito/floob-clj "0.2.9-write-only-to-bt"]
+                 [com.cycognito/floob-clj "0.3.2-only-write-to-bt"]
                  [com.stuartsierra/component "1.0.0"]
                  [ring "1.8.2"]
                  [clj-http "3.12.0"]
